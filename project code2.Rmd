@@ -1,0 +1,647 @@
+---
+title: "Project"
+author: ""
+date: "12/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r eval=FALSE}
+library(tidyverse)
+library(dplyr)
+library(spatstat)
+library(modelr)
+library(survey)
+library(srvyr,warn.conflicts = FALSE)
+library(tidycensus)
+library(caret)
+```
+
+```{r eval=FALSE}
+st_list <-c('AL','AK','AZ','AR','CA','CO','CT','DE','DC','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY')
+```
+
+
+```{r eval=FALSE}
+for (state_index in st_list) {
+  df <- get_pums(
+  variables = c("AGEP","SEX","CIT","ENG","SCHL","ESR","COW","OCCP","WAGP",
+                "PINCP","SERIALNO","POBP","PUMA","WKHP","JWTRNS","RAC1P",
+                "HISP","NAICSP"),
+  state = state_index,
+  survey = "acs1",
+  year = 2019,
+  recode = TRUE,
+  rep_weights = "person",
+  key = "census key"
+  )
+  write_csv(df,paste0(state_index,"_data.csv"))
+}
+```
+
+```{r eval=FALSE}
+df <- data.frame()
+
+for (state_index in st_list) {
+  temp <- read_csv(paste0("acs1_data/",state_index,"_data.csv"),col_types = cols(
+    ST = col_double(),
+    PUMA = col_double()
+  ))
+  temp <- temp%>%filter(
+    (ESR==1|ESR==2|ESR==4|ESR==5),   # civilian employed
+    JWTRNS != 11, # does not work at home
+    PINCP > 0,   # income is above 0
+    WAGP > 0,
+    AGEP>=25,# 25 years old or over
+    (OCCP<6000 | OCCP>= 6200) & (OCCP<9800)
+    )
+  df <- dplyr::bind_rows(df, temp)
+}
+
+```
+
+
+```{r eval=FALSE}
+df_processed <- df %>% 
+  mutate(SCHL1 = as.numeric(SCHL))%>%
+  mutate(
+    educational_attainment = case_when(
+      (SCHL1>=1) & (SCHL1<=15) ~ 'Less than high school',
+      (SCHL1>=16) & (SCHL1<=17) ~ 'High School Graduate/GED or Alternative Credential',
+      (SCHL1>=18) & (SCHL1<=20) ~ 'Some College/Associate Degree',
+      (SCHL1>=21) & (SCHL1<=24) ~ 'Bachelor Degree or Higher',
+      (is.na(SCHL1) ~ 'Less than high school')),
+    naics2 =  substr(NAICSP,1,2),
+    industry = case_when(naics2=="72"  ~ 'Accommodation and Food Services', 
+                          naics2=="71" ~ 'Arts, Entertainment and Recreation',
+                          naics2=="23" ~ 'Construction',
+                          naics2=="61" ~ 'Education',
+                          naics2=="52" | naics2=="53" ~ 'Finance, Insurance, and Real Estate',
+                          naics2=="62" ~ 'Health Care & Social Assistance',
+                          naics2=="51" ~ 'Information',
+                          naics2=="31" | naics2=="32" | naics2=="33" | naics2=="3M" ~ 'Manufacturing',
+                          naics2=="81" ~ 'Other Services',
+                          naics2=="54" | naics2=="55" | naics2=="56" ~ 'Professional, Scientific, Management, and Administrative Services',
+                          naics2=="92" ~ 'Public Administration',
+                          naics2=="44" | naics2=="45" | naics2=="4M" ~ 'Retail',
+                          naics2=="22" | naics2=="11" | naics2=="21"  | naics2=="48" | naics2=="49" ~ 'Transportation, Warehousing, & Utilities & Natural resources',
+                          naics2=="42" ~ 'Wholesale Trade',
+                          naics2=="99" ~ 'Other'),
+    occupation = case_when((OCCP>0 & OCCP<2000) | (OCCP>=2100 & OCCP<2200) ~ 'Management and Professional',
+                           (OCCP>=3600 & OCCP<4700) | (OCCP>=2001 & OCCP<2100) ~ 'Services',
+                           (OCCP>=4700 & OCCP<6000) ~ 'Sales and Office',
+                           (OCCP>=6200 & OCCP<7000) ~ 'Construction and Extracion',
+                           (OCCP>=7000 & OCCP<7700) ~ 'Maintenance and Repair',
+                           (OCCP>=7700 & OCCP<9800) ~ 'Production & Transportation',
+                           (OCCP>=2200 & OCCP<2600) ~ 'Education and Library',
+                           (OCCP>=2600 & OCCP<3000) ~ 'Arts,Sports,and Media',
+                           (OCCP>=3000 & OCCP<3600) ~ 'Healthcare  and Technical',
+                           (OCCP>=6000 & OCCP< 6200) | (OCCP>=9800) ~ 'Other'
+),
+english_ability = case_when(   (is.na(ENG)|ENG=='b') ~ 'Very Well',
+                              (ENG==1) ~ 'Very Well',
+                              (ENG==2) ~ 'Well',
+                              (ENG==3) ~ 'Not Well'),
+nativity = case_when(
+  CIT>=4&CIT<=5 ~ "Foreign Born",
+  CIT>=1&CIT<=3 ~ "Native Born"), 
+gender = case_when(
+      SEX == 1  ~ "Male",
+      SEX == 2  ~ "Female"
+    ),
+race = dplyr::case_when(
+      RAC1P==1  ~ "White",
+      RAC1P==2  ~ "Black",
+      RAC1P==6  ~ "Asian",
+      RAC1P!=1 & RAC1P!=2 & RAC1P!=6 ~ "Other"),
+income = PINCP
+) 
+``` 
+
+```{r}
+df_processed$educational_attainment <- as.factor(df_processed$educational_attainment)
+
+df_processed$english_ability <- as.factor(df_processed$english_ability)
+
+```
+
+```{r warning=FALSE}
+set.seed(1)
+train <- createDataPartition(df_processed$nativity, p=0.2, list=FALSE)
+
+df_part_1 <- df_processed[as.integer(train),]
+df_part_2 <- df_processed[-as.integer(train),]
+```
+
+
+Visualization: 
+
+```{r}
+ggplot(df_part_1, aes(x=reorder(educational_attainment,income,na.rm = TRUE), y=income,fill=educational_attainment)) + 
+  geom_boxplot(show.legend = FALSE) +
+ labs(x="Educational Attainment",  y="Personal Income", title="Personal Income by Education Attainment") +
+  scale_y_log10()+
+  coord_flip() + 
+  scale_fill_viridis_d()
+```
+
+
+```{r, fig.width=2,fig.height=2}
+ggplot(df_part_1, aes(x=reorder(race,income,na.rm = TRUE), y=income,fill= race)) + 
+  geom_boxplot(show.legend = FALSE) +
+ labs(x="Race",  y="Personal Income", title="Income by Race") +
+  scale_y_log10()+
+  coord_flip() + 
+  scale_fill_viridis_d()
+```
+
+
+```{r}
+df_part_1 <- df_part_1 %>% 
+  mutate(
+    # Create categories
+    Age_Group = dplyr::case_when(
+      AGEP <= 15           ~ "0-15",
+      AGEP > 15 & AGEP <= 19 ~ "16-19",
+      AGEP > 19 & AGEP <= 24 ~ "20-24",
+      AGEP > 24 & AGEP <= 29 ~ "25-29",
+      AGEP > 29 & AGEP <= 34 ~ "30-34",
+      AGEP > 34 & AGEP <= 39 ~ "35-39",
+      AGEP > 39 & AGEP <= 44 ~ "40-44",
+      AGEP > 44 & AGEP <= 49 ~ "45-49",
+      AGEP > 49 & AGEP <= 54 ~ "50-54",
+      AGEP > 54 & AGEP <= 59 ~ "55-59",
+      AGEP > 59 & AGEP <= 64 ~ "60-64",
+      AGEP > 64 & AGEP <= 69 ~ "65-69",
+      AGEP > 69 & AGEP <= 75 ~ "70-74",
+      AGEP > 75            ~ "> 75"
+    ),
+    # Convert to factor
+    Age_Group = factor(
+      Age_Group,
+      level = c("0-15","16-19","20-24", "25-29", "30-34", "35-39", "40-44", "45-49", "50-54", "55-59", "60-64", "65-69", "70-74", "> 75")
+    )
+  )
+```
+
+```{r, fig.width=2,fig.height=2}
+ggplot(df_part_1, aes(x=Age_Group, y=income,fill= Age_Group)) + 
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_log10()+
+  coord_flip() +
+ labs(x="Age Group",  y="Personal Income", title="Personal Income by Age Group") + 
+  scale_fill_viridis_d()
+```
+```{r, fig.width=2,fig.height=2}
+ggplot(df_part_1, aes(x=nativity, y=income, fill = nativity)) + 
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_log10()+
+  coord_flip() +
+ labs(x="Nativity",  y="Personal Income", title="Personal Income by Nativity")+
+  scale_fill_viridis_d()
+```
+
+```{r, fig.width=2,fig.height=2}
+ggplot(df_part_1, aes(x=gender, y=income,fill= gender)) + 
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_log10()+
+  coord_flip() +
+ labs(x="Gender",  y="Personal Income", title="Personal Income by Gender") +
+ scale_fill_viridis_d()
+```
+
+```{r, fig.width=2,fig.height=2}
+ggplot(df_part_1[!is.na(df_part_1$english_ability),], aes(x=reorder(english_ability,income,na.rm = TRUE), y=income,fill= english_ability)) + 
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_log10()+
+  coord_flip() +
+ labs(x="Occupation",  y="Personal Income", title="Personal Income by English Ability") +
+  scale_fill_viridis_d()
+```
+
+```{r, fig.width=4,fig.height=4}
+ggplot(df_part_1, aes(x=reorder(industry,income,na.rm = TRUE), y=income,fill=industry)) + 
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_log10()+
+  coord_flip() +
+ labs(x="Industry",  y="Personal Income", title="Personal Income by Industry") +
+  scale_fill_viridis_d()
+```
+
+```{r, fig.width=3,fig.height=4}
+ggplot(df_part_1, aes(x=reorder(occupation,income,na.rm = TRUE), y=income,fill=occupation)) + 
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_log10()+
+  coord_flip() +
+ labs(x="Occupation",  y="Personal Income", title="Personal Income by Occupation") +
+  scale_fill_viridis_d()
+```
+```{r}
+ggplot(df_part_1, aes(x=WKHP, y=income)) + 
+  geom_point(alpha=0.3) +
+  geom_smooth(aes(color = 'blue'),show.legend = FALSE)+
+  scale_y_log10()+
+ labs(x="Hours Worked Per Week",  y="Personal Income", title="Income by Hours Worked per Week") +theme_minimal()
+```
+
+Visualize to see if there is very strong patterns among explanatory variables 
+
+```{r, fig.width=2,fig.height=2}
+ggplot(df_part_1, aes(y=WKHP, x=Age_Group,fill=Age_Group)) + 
+  geom_boxplot(show.legend = FALSE) +
+  scale_y_log10()+
+ labs(x="Age Group",  y="Hours Worked Per Week", title="") +coord_flip()
+```
+```{r, fig.width=2,fig.height=2}
+
+ggplot(df_part_1, aes(y=WKHP, x=nativity,fill=nativity)) + 
+  geom_boxplot(show.legend = FALSE) +
+ labs(x="Nativity",  y="Hours Worked Per Week", title="Total Work Hours by Nativty") +coord_flip()
+```
+
+
+```{r, fig.width=3,fig.height=1}
+ggplot(df_part_1, aes(Age_Group, ..count..)) + 
+  geom_bar(aes(fill = nativity), position = "dodge")+ 
+  labs(x="",  y="", title="Age Group by Nativity") + 
+  guides(fill=guide_legend("Nativity")) 
+```
+
+```{r, fig.width=3,fig.height=1}
+ggplot(df_part_1, aes(Age_Group, ..count..)) + 
+  geom_bar(aes(fill = SEX), position = "dodge")+ 
+  labs(x="",  y="", title="Age Group by Nativity") + 
+  guides(fill=guide_legend("Nativity")) 
+```
+
+```{r, fig.width=2,fig.height=1}
+ggplot(df_part_1, aes(gender, ..count..)) + 
+  geom_bar(aes(fill = nativity), position = "dodge")+ 
+  labs(x="",  y="", title="Gender by Nativity") + 
+  guides(fill=guide_legend("Nativity")) 
+```
+
+```{r, fig.width=3,fig.height=1}
+ggplot(df_part_1, aes(educational_attainment, ..count..)) + 
+  geom_bar(aes(fill = nativity), position = "dodge")+ 
+  labs(x="",  y="", title="Educational Attainment by Nativity") + 
+  guides(fill=guide_legend("Nativity")) + theme(axis.text.x = element_text(angle = 40, vjust = 0.5, hjust=1)) +
+  coord_flip()
+```
+
+```{r, fig.width=3,fig.height=1}
+ggplot(df_part_1, aes(occupation, ..count..)) + 
+  geom_bar(aes(fill = nativity), position = "dodge")+ 
+  labs(x="",  y="", title="Occupation by Nativity") + 
+  guides(fill=guide_legend("Nativity")) +
+  coord_flip()
+```
+
+
+
+```{r, fig.width=6,fig.height=2}
+ggplot(df_part_1, aes(x=educational_attainment, y=income,fill= educational_attainment)) + 
+  geom_boxplot(show.legend = FALSE) +
+  labs(x="Educational Attainment",  y="Personal Income", title="Personal Income by Education Attainment and Occupation") +
+  scale_y_log10() +
+  coord_flip() + facet_wrap(~occupation,ncol=5) + 
+  scale_fill_viridis_d()
+
+
+#png("Personal Income by Education Attainment and Occupation.png")
+#print(p)
+  
+```
+
+
+```{r}
+df_part_1 <- df_part_1%>%mutate(english_very_well = case_when(english_ability == "Very Well"~1,
+                                                              TRUE ~ 0))
+```
+
+```{r}
+fit <- glm(english_very_well~nativity, data=df_part_1, family=binomial(link="logit"))
+summary(fit)
+```
+
+```{r}
+fit <- lm(WKHP ~ AGEP, data=df_part_1)
+summary(fit)
+```
+
+Modeling and Hypothesis Testing
+
+```{r}
+df_part_2<- within(df_part_2, educational_attainment<-relevel(educational_attainment,ref=2))
+```
+
+
+```{r}
+df_part_2$race <- as.factor(df_part_2$race)
+df_part_2<- within(df_part_2, race<-relevel(race,ref=4))
+```
+
+
+```{r}
+df_part_2<- within(df_part_2, english_ability<-relevel(english_ability,ref=3))
+```
+
+
+```{r}
+df_part_2$ST <- as.character(df_part_2$ST)
+```
+
+```{r}
+model_sd <- df_part_2%>%
+  to_survey()
+```
+
+
+```{r}
+model_1 <- survey::svyglm(log(income) ~ nativity, design = model_sd)
+summary(model_1)
+```
+
+Nativity and English speaking ability 
+
+```{r}
+model_2 <- survey::svyglm(log(income) ~  nativity  + AGEP + gender+ WKHP + educational_attainment +english_ability + race + occupation, design = model_sd)
+summary(model_2)
+```
+
+```{r}
+model_3 <- survey::svyglm(log(income) ~  nativity  + AGEP + gender+ WKHP + educational_attainment +english_ability + race + occupation +ST, design = model_sd)
+summary(model_3)
+```
+
+
+Only immigrants.
+
+
+```{r}
+fb_worker <- df_part_2%>%filter(nativity=="Foreign Born") 
+
+model_sd_fb <- fb_worker%>%
+  to_survey()
+``` 
+
+
+
+
+```{r}
+model_4 <- survey::svyglm(log(income) ~  AGEP + gender + race + WKHP + educational_attainment + english_ability + occupation + ST, design = model_sd_fb)
+summary(model_4)
+```
+
+
+
+```{r}
+fb_worker <- df_part_2%>%filter(nativity=="Foreign Born") 
+fb_worker<- within(fb_worker, educational_attainment<-relevel(educational_attainment,ref=3))
+fb_worker$occupation <- as.factor(fb_worker$occupation)
+``` 
+
+```{r}
+fb_worker<- within(fb_worker, occupation<-relevel(occupation,ref=9))
+```
+
+```{r}
+head(fb_worker$occupation)
+```
+
+
+```{r}
+model_sd_fb <- fb_worker%>%
+  to_survey()
+```
+
+```{r}
+model_4 <- survey::svyglm(log(income) ~  AGEP + gender + race + WKHP + educational_attainment + english_ability + occupation + ST, design = model_sd_fb)
+summary(model_4)
+```
+
+
+
+```{r}
+library(tigris)
+library(acs)
+library(stringr)
+library(leaflet)
+library(htmlwidgets)
+library(ggplot2)
+library(tidyverse)
+library(sp)
+library(sf)
+library(maptools)
+library(move)
+```
+
+Shapefile of U.S. cities is from https://hub.arcgis.com/datasets/esri::usa-major-cities/about
+
+
+```{r}
+major_cities <- read_csv("USA_Major_Cities_with_PUMA.csv")
+```
+
+```{r}
+puma_boundary <- st_read(
+  "ipums_puma/ipums_puma.shp")
+```
+
+
+```{r}
+api.key.install(key="census key")
+geo <- geo.make(state=unique(fips_codes$state)[1:51], puma='*')
+```
+
+```{r}
+endyr=2019
+sp=5
+tabnum = "B05001"
+data <- acs.fetch(endyear=endyr,span=sp,geography=geo,
+                      table.number=tabnum,col.names="pretty")
+
+```
+
+```{r}
+endyr=2019
+sp=5
+tabnum = "B06011"
+data <- acs.fetch(endyear=endyr,span=sp,geography=geo,
+                      table.number=tabnum,col.names="pretty")
+
+```
+
+```{r}
+endyr=2019
+sp=5
+tabnum = "B07004FPR"
+data <- acs.fetch(endyear=endyr,span=sp,geography=geo,
+                      table.number=tabnum,col.names="pretty")
+
+```
+
+
+```{r}
+# convert to a data.frame for merging
+temp_df <- data.frame(data@geography$NAME,
+                          paste0(str_pad(data@geography$state,2,"left",pad="0"),
+                                 str_pad(data@geography$publicusemicrodataarea,5,"left",pad="0")),
+                          data@estimate[,], stringsAsFactors=FALSE)
+
+```
+
+
+```{r}
+write_csv(temp_df,paste0(tabnum,'.csv'))
+```
+
+```{r}
+B05002 <- read_csv('B05002.csv')
+colnames(B05002)[2]<- 'GEOID'
+```
+
+```{r}
+B07004FPR <- read_csv('B07004FPR.csv')
+colnames(B07004FPR)[2]<- 'GEOID'
+```
+
+```{r}
+B06011 <- read_csv('B06011.csv')
+
+# convert to a data.frame for merging
+colnames(B06011)[2]<- 'GEOID'
+```
+
+
+```{r}
+B05001 <- read_csv('B05001.csv')
+colnames(B05001)[2]<- 'GEOID'
+```
+
+
+```{r}
+combined_df <- B05001%>%left_join(B05002,c("GEOID"))%>%left_join(B06011,c("GEOID"))%>%left_join(B07004FPR,c("GEOID"))
+```
+
+
+```{r}
+data.df <- combined_df[,c(1,2,3,7,8,24:29,31:36,42)]
+```
+
+
+```{r}
+# do some cleaning of the data frame and create variables of interest
+colnames(data.df) <- c("name","GEOID","total","naturalized_citizen",
+                           "not_citizen","naturalized_citizen_europe",
+                           "naturalized_citizen_asia","naturalized_citizen_africa",
+                           "naturalized_citizen_Oceania","naturalized_citizen_latin_america",
+                           "naturalized_citizen_northern_america","fb_europe",
+                           "fb_asia","fb_africa",
+                           "fb_Oceania","fb_latin_america",
+                           "fb_northern_america","median_income")
+```
+
+
+```{r}
+data.df$immigrants<-data.df$naturalized_citizen+data.df$not_citizen
+data.df$pct.immigrants <- 100*(data.df$immigrants/data.df$total)
+```
+
+The final step before mapping the data: merge the data with the geography file.
+
+
+```{r}
+# do the merge
+data.df.merged <- geo_join(puma_boundary,data.df,"GEOID","GEOID")
+```
+
+Select the top 10 cities in major cities list with the highest share of immigrant population
+
+```{r}
+top_pumas <- data.df.merged%>%filter(pct.immigrants>10)
+```
+
+
+```{r}
+selected_cites <- top_n(major_cities,50,POPULATION)%>%filter(PUMA_GEO%in%top_pumas$GEOID)
+selected_cites <- selected_cites%>%filter(NAME!="Fort Worth"&NAME!="Arlington")
+```
+
+
+```{r fig.width = 10, fig.height =8}
+#ggplot() +
+#  geom_sf(data.df.merged, mapping = aes(fill=pct.immigrants), colour = NA) + 
+#  labs(title = "Percentage of Immigrant Population") +
+#  scale_fill_continuous(name ="", low="grey", high="blue")+ 
+#  theme_minimal() + 
+#  theme(legend.position = "top") + 
+#  geom_text(selected_cites,
+#            mapping = aes(label = paste0(NAME," (",ST,")"), 
+#                          x = X, y = Y),size=2)+
+#  labs(x= "Longitude", y= "Latitude")
+
+```
+
+
+```{r}
+popup <- paste0("<B>", "Area: ", "</B>",data.df.merged$name, 
+                "<br>", "<B>", "Percentage of foreign-born population: ","</B>", paste0(round(data.df.merged$pct.immigrants,2),"%"),
+                "<br>","<B>", "Median Income of Immigrants: ","</B>",paste0("$",data.df.merged$median_income),
+                "<br>","",
+                "<br>", "<B>","Naturalized Citizen by Place of Birth ","</B>",
+                 "<br>", "Total Naturalized Citizen: ",data.df.merged$naturalized_citizen,
+                 "<br>", "  Europe: ",data.df.merged$naturalized_citizen_europe,
+                "<br>", "  Asia: ",data.df.merged$naturalized_citizen_asia,
+                "<br>", "  Africa: ",data.df.merged$naturalized_citizen_africa,
+                "<br>", "  Oceania: ",data.df.merged$naturalized_citizen_Oceania,
+                "<br>", "  Latin America: ",data.df.merged$naturalized_citizen_latin_america,
+                "<br>", "  Northern America: ",data.df.merged$naturalized_citizen_northern_america,
+                "<br>","",
+                "<br>", "<B>","Non-Citizen by Place of Birth ","</B>",
+                 "<br>", "Total Non-Citizen: ",data.df.merged$not_citizen,
+                 "<br>", "  Europe: ",data.df.merged$fb_europe,
+                "<br>", "  Asia: ",data.df.merged$fb_asia,
+                "<br>", "  Africa: ",data.df.merged$naturalized_citizen_africa,
+                "<br>", "  Oceania: ",data.df.merged$naturalized_citizen_Oceania,
+                "<br>", "  Latin America: ",data.df.merged$fb_latin_america,
+                "<br>", "  Northern America: ",data.df.merged$fb_northern_america)
+                
+pal <- colorNumeric(
+  palette = "YlGnBu",
+  domain = data.df.merged$pct.immigrants
+)
+immigrant_share<-leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(data = data.df.merged, 
+              fillColor = ~pal(pct.immigrants), 
+              color = "#b2aeae", # you need to use hex colors
+              fillOpacity = 0.7, 
+              weight = 1, 
+              smoothFactor = 0.2,
+              popup = popup) %>%
+  addLegend(pal = pal, 
+            values = data.df.merged$pct.immigrants, 
+            position = "bottomright", 
+            title = "Percentage of foreign-born population",
+            labFormat = labelFormat(suffix = "%")) 
+```
+
+
+```{r}
+# don't forget to save
+saveWidget(immigrant_share,file="immigrant share.html",selfcontained = F)
+# this will save the map in your directory and will allow
+# you to open it in a web browser to peruse
+```
+
+```{r}
+df_test <- head(df,20)
+```
+
+
+
+
