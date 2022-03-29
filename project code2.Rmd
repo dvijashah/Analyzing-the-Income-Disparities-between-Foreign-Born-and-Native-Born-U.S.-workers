@@ -24,6 +24,7 @@ library(caret)
 st_list <-c('AL','AK','AZ','AR','CA','CO','CT','DE','DC','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY')
 ```
 
+you can get the census key from https://api.census.gov/data/key_signup.html
 
 ```{r eval=FALSE}
 for (state_index in st_list) {
